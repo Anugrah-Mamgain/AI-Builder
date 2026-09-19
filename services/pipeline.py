@@ -72,9 +72,13 @@ def _parse_document(data: bytes, name: str) -> tuple[str, bool]:
         return (data.decode("utf-8", errors="replace") if name.lower().endswith(".txt")
                 else f"Demo content extracted from {name}"), True
     try:
-        return extract_text(data, name), False
-    except TypeError:
-        return extract_text(data, filename=name), False
+        try:
+            return extract_text(data, name), False
+        except TypeError:
+            return extract_text(data, filename=name), False
+    except NotImplementedError:
+        return (data.decode("utf-8", errors="replace") if name.lower().endswith(".txt")
+                else f"Demo content extracted from {name}"), True
 
 
 def _redact(text: str) -> tuple[str, bool]:
@@ -82,7 +86,10 @@ def _redact(text: str) -> tuple[str, bool]:
         from utils.pii import redact_pii
     except (ImportError, ModuleNotFoundError):
         return text, True
-    return redact_pii(text), False
+    try:
+        return redact_pii(text), False
+    except NotImplementedError:
+        return text, True
 
 
 def _mock_generate(text: str, slide_count: int, qa_count: int) -> dict[str, Any]:
@@ -172,9 +179,12 @@ def _generate(text: str, settings: dict[str, Any]) -> tuple[Any, bool]:
     except (ImportError, ModuleNotFoundError):
         return _mock_generate(text, settings["slide_count"], settings["qa_count"]), True
     try:
-        return generate_presentation(source_text=text, **settings), False
-    except TypeError:
-        return generate_presentation(text, **settings), False
+        try:
+            return generate_presentation(source_text=text, **settings), False
+        except TypeError:
+            return generate_presentation(text, **settings), False
+    except NotImplementedError:
+        return _mock_generate(text, settings["slide_count"], settings["qa_count"]), True
 
 
 def _save(deck: Any, settings: dict[str, Any]) -> bool:
@@ -189,9 +199,18 @@ def _save(deck: Any, settings: dict[str, Any]) -> bool:
         })
         return True
     try:
-        save_presentation(deck=deck, **settings)
-    except TypeError:
-        save_presentation(deck, settings)
+        try:
+            save_presentation(deck=deck, **settings)
+        except TypeError:
+            save_presentation(deck, settings)
+    except NotImplementedError:
+        _DEMO_HISTORY.insert(0, {
+            "id": len(_DEMO_HISTORY) + 1,
+            "title": _as_dict(deck).get("title", "Untitled presentation"),
+            "audience": settings["audience"], "tone": settings["tone"],
+            "created_at": "Current session", "deck": copy.deepcopy(deck),
+        })
+        return True
     return False
 
 
@@ -228,8 +247,12 @@ def regenerate_deck_slide(*, deck: Any, slide_index: int,
         slides[slide_index]["bullets"] = list(reversed(slides[slide_index].get("bullets", [])))
         slides[slide_index]["speaker_notes"] = (slides[slide_index].get("speaker_notes", "") + " Emphasize the audience outcome.").strip()
         return deck, True
-    replacement = regenerate_slide(slide=slides[slide_index], slide_index=slide_index,
-                                   deck=deck, **settings)
+    try:
+        replacement = regenerate_slide(slide=slides[slide_index], slide_index=slide_index,
+                                       deck=deck, **settings)
+    except NotImplementedError:
+        slides[slide_index]["bullets"] = list(reversed(slides[slide_index].get("bullets", [])))
+        return deck, True
     if isinstance(deck, dict):
         deck["slides"][slide_index] = replacement
     else:
@@ -242,7 +265,10 @@ def get_history_items() -> list[Any]:
         from db.crud import get_history
     except (ImportError, ModuleNotFoundError):
         return _DEMO_HISTORY
-    return get_history()
+    try:
+        return get_history()
+    except NotImplementedError:
+        return _DEMO_HISTORY
 
 
 def load_history_deck(presentation_id: Any) -> Any:
@@ -253,7 +279,13 @@ def load_history_deck(presentation_id: Any) -> Any:
             if str(record["id"]) == str(presentation_id):
                 return copy.deepcopy(record["deck"])
         raise KeyError("Presentation not found in this session.")
-    return get_presentation(presentation_id)
+    try:
+        return get_presentation(presentation_id)
+    except NotImplementedError:
+        for record in _DEMO_HISTORY:
+            if str(record["id"]) == str(presentation_id):
+                return copy.deepcopy(record["deck"])
+        raise KeyError("Presentation not found in this session.")
 
 
 def export_deck(deck: Any) -> tuple[bytes, bool]:
@@ -261,7 +293,10 @@ def export_deck(deck: Any) -> tuple[bytes, bool]:
         from utils.exporter import export_pptx
     except (ImportError, ModuleNotFoundError):
         return _fallback_export(deck), True
-    result = export_pptx(deck)
+    try:
+        result = export_pptx(deck)
+    except NotImplementedError:
+        return _fallback_export(deck), True
     if isinstance(result, io.BytesIO):
         return result.getvalue(), False
     if isinstance(result, bytes):
