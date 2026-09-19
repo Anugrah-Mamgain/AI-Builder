@@ -177,17 +177,45 @@ def _generate(text: str, settings: dict[str, Any]) -> tuple[Any, bool]:
     try:
         from llm.generator import generate_presentation
     except (ImportError, ModuleNotFoundError):
-        return _mock_generate(text, settings["slide_count"], settings["qa_count"]), True
+        return (
+            _mock_generate(
+                text,
+                settings["slide_count"],
+                settings["qa_count"],
+            ),
+            True,
+        )
+
     try:
-        try:
-            return generate_presentation(source_text=text, **settings), False
-        except TypeError:
-            return generate_presentation(text, **settings), False
+        deck = generate_presentation(
+            text=text,
+            audience=settings["audience"],
+            tone=settings["tone"],
+            duration_min=settings["duration_minutes"],
+            num_questions=settings["qa_count"],
+            input_type="document",
+        )
+        return deck, False
+
     except NotImplementedError:
-        return _mock_generate(text, settings["slide_count"], settings["qa_count"]), True
+        return (
+            _mock_generate(
+                text,
+                settings["slide_count"],
+                settings["qa_count"],
+            ),
+            True,
+        )
 
 
-def _save(deck: Any, settings: dict[str, Any]) -> bool:
+def _save(
+    deck: Any,
+    settings: dict[str, Any],
+    *,
+    filename: str | None = None,
+    content_hash: str | None = None,
+    redacted_text: str | None = None,
+) -> bool:
     try:
         from db.crud import save_presentation
     except (ImportError, ModuleNotFoundError):
@@ -200,7 +228,15 @@ def _save(deck: Any, settings: dict[str, Any]) -> bool:
         return True
     try:
         try:
-            save_presentation(deck=deck, **settings)
+            save_presentation(
+    deck=deck,
+    tone=settings["tone"],
+    duration_min=settings["duration_minutes"],
+    input_type="document" if filename else "idea",
+    filename=filename,
+    redacted_text=redacted_text,
+    content_hash=content_hash,
+)
         except TypeError:
             save_presentation(deck, settings)
     except NotImplementedError:
@@ -219,10 +255,17 @@ def build_deck(*, source_type: str, idea: str, uploaded_bytes: bytes | None,
                duration_minutes: int, slide_count: int, qa_count: int) -> tuple[Any, bool]:
     settings = {"audience": audience, "tone": tone, "duration_minutes": duration_minutes,
                 "slide_count": slide_count, "qa_count": qa_count}
+    content_hash = None
     demo = False
     if source_type == "document":
         if not uploaded_bytes or not uploaded_name:
             raise ValueError("Please upload a source document.")
+        from utils.parser import content_hash as calculate_content_hash
+
+        content_hash = calculate_content_hash(
+        uploaded_bytes,
+        uploaded_name,
+        )
         text, fallback = _parse_document(uploaded_bytes, uploaded_name)
         demo |= fallback
     else:
@@ -231,7 +274,13 @@ def build_deck(*, source_type: str, idea: str, uploaded_bytes: bytes | None,
         raise ValueError("Please provide some source content.")
     text, fallback = _redact(text); demo |= fallback
     deck, fallback = _generate(text, settings); demo |= fallback
-    demo |= _save(deck, settings)
+    demo |= _save(
+    deck,
+    settings,
+    filename=uploaded_name if source_type == "document" else None,
+    content_hash=content_hash,
+    redacted_text=text if source_type == "document" else None,
+)
     LOGGER.info("Presentation pipeline completed")
     return deck, demo
 
