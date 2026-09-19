@@ -1,12 +1,12 @@
 """db/crud.py — Database operations. Owner: P2.
 
-Input/output uses Pydantic models from schemas.py so the rest of the app
+Input/output uses the Pydantic models from schemas.py so the rest of the app
 does not need to interact with SQL directly.
 
 Security:
 - Only redacted_text may be persisted.
-- content_hash must represent the ORIGINAL uploaded file bytes.
-- Raw source text must never be stored.
+- content_hash represents the ORIGINAL uploaded file bytes.
+- Raw source text is never intentionally persisted.
 """
 
 from typing import List, Optional, Union
@@ -21,6 +21,22 @@ from db.models import (
 from schemas import AudienceQuestion, Presentation, Slide
 
 
+def _validate_content_hash(content_hash: Optional[str]) -> None:
+    """Validate an optional SHA-256 hexadecimal digest."""
+    if content_hash is None:
+        return
+
+    if len(content_hash) != 64:
+        raise ValueError("content_hash must be a SHA-256 hex digest.")
+
+    try:
+        int(content_hash, 16)
+    except ValueError as exc:
+        raise ValueError(
+            "content_hash must contain only hexadecimal characters."
+        ) from exc
+
+
 def save_presentation(
     deck: Presentation,
     tone: str = "",
@@ -30,34 +46,25 @@ def save_presentation(
     redacted_text: Optional[str] = None,
     content_hash: Optional[str] = None,
 ) -> int:
-    """Save presentation, slides, questions and optional sanitized source.
+    """Save a presentation and its related data.
 
-    Returns:
-        Database presentation ID.
-
-    Raises:
-        ValueError: if source-document metadata is incomplete or unsafe.
+    For document uploads, only sanitized/redacted text is stored. The hash
+    must have been calculated from the original uploaded bytes before
+    redaction.
     """
+    has_source_document = (
+        filename is not None or redacted_text is not None
+    )
 
-    # A source document must never be stored without a content hash.
-    if filename is not None and not content_hash:
+    if has_source_document and not content_hash:
         raise ValueError(
             "content_hash is required when saving a source document."
         )
 
-    # We only persist sanitized/redacted text.
     if redacted_text is not None and not isinstance(redacted_text, str):
         raise TypeError("redacted_text must be a string or None.")
 
-    if content_hash is not None:
-        if len(content_hash) != 64:
-            raise ValueError("content_hash must be a SHA-256 hex digest.")
-        try:
-            int(content_hash, 16)
-        except ValueError as exc:
-            raise ValueError(
-                "content_hash must contain only hexadecimal characters."
-            ) from exc
+    _validate_content_hash(content_hash)
 
     session = SessionLocal()
 
@@ -71,7 +78,7 @@ def save_presentation(
         )
 
         session.add(presentation_row)
-        session.flush()  # Gets presentation_row.id.
+        session.flush()
 
         for slide in deck.slides:
             slide_row = SlideRow(
@@ -82,7 +89,6 @@ def save_presentation(
                 speaker_notes=slide.speaker_notes,
                 visual_suggestion=slide.visual_suggestion,
             )
-
             session.add(slide_row)
 
         for question in deck.audience_questions:
@@ -91,22 +97,18 @@ def save_presentation(
                 question=question.question,
                 suggested_answer=question.suggested_answer,
             )
-
             session.add(question_row)
 
-        # Only sanitized text is persisted.
-        if filename is not None or redacted_text is not None:
+        if has_source_document:
             document_row = SourceDocumentRow(
                 presentation_id=presentation_row.id,
                 filename=filename,
                 content_hash=content_hash,
                 redacted_text=redacted_text,
             )
-
             session.add(document_row)
 
         session.commit()
-
         return presentation_row.id
 
     except Exception:
@@ -119,7 +121,6 @@ def save_presentation(
 
 def get_history(limit: int = 20) -> List[dict]:
     """Return recent presentation metadata, newest first."""
-
     if limit <= 0:
         return []
 
@@ -162,8 +163,7 @@ def get_history(limit: int = 20) -> List[dict]:
 def get_presentation(
     presentation_id: int,
 ) -> Optional[Presentation]:
-    """Load a saved presentation as a Pydantic Presentation model."""
-
+    """Load a saved deck as a Pydantic Presentation."""
     session = SessionLocal()
 
     try:
@@ -217,16 +217,14 @@ def update_slide(
 ) -> bool:
     """Replace one slide after regeneration.
 
-    Returns:
-        True if the slide was found and updated, otherwise False.
+    Returns True if updated, False if the slide does not exist.
     """
-
     if isinstance(new_slide, Slide):
         slide_data = new_slide.model_dump()
     elif isinstance(new_slide, dict):
         slide_data = new_slide
     else:
-        raise ValueError("new_slide must be a Slide or dict.")
+        raise ValueError("new_slide must be a Slide object or dict.")
 
     session = SessionLocal()
 
@@ -256,7 +254,6 @@ def update_slide(
             slide_row.visual_suggestion = slide_data["visual_suggestion"]
 
         session.commit()
-
         return True
 
     except Exception:
